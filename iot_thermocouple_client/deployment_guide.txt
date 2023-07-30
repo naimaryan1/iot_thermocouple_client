@@ -1,3 +1,5 @@
+
+#Github:https://github.com/naimaryan1/iot_thermocouple_client/tree/master/iot_thermocouple_client
 #change <YOUR_PATH>
 
 sudo chmod +x <YOUR_PATH>/tcsimd
