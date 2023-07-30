@@ -1,0 +1,9 @@
+{
+    "iot_id": "1000",
+    "web_service_base_url": "http://20.163.108.241",
+    "web_service_base_port": "5000",
+    "create_config": "/create_iot_device",
+    "read_config": "/read_iot_device",
+    "update_config": "/update_iot_device",
+    "delete_config": "/delete_iot_device"
+}

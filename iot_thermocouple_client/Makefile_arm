@@ -1,0 +1,24 @@
+BUILDROOT_HOME=/home/ary/build_root_repo/buildroot
+CC=$(BUILDROOT_HOME)/output/host/usr/bin/arm-linux-cc
+CFLAGS=--sysroot=$(BUILDROOT_HOME)/output/staging 
+
+LFLAGS= 
+
+LIBS=-lcurl -uClibc -lc -lpthread -ljson-c
+
+SRC=main.c
+OBJ= $(wildcard *.c)
+MAIN= arm_thermocouple_client_main
+
+RM=rm -rf
+
+.c.o:
+	$(CC) $(CFLAGS) -c $< -o $@
+
+all: $(MAIN)
+
+$(MAIN): $(OBJ)
+	$(CC) $(CFLAGS) -o $(MAIN) $(OBJ) $(LFLAGS) $(LIBS)
+
+clean:
+	$(RM) *o $(MAIN)

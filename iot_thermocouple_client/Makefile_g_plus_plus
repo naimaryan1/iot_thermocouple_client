@@ -1,0 +1,22 @@
+CC = gcc
+CPP = g++
+LIBS= -lm -lpthread
+EXT_LIBS = -lcurl -ljson-c
+CFLAGS = -g3 -Wall -pedantic -I. -I$(EXT_INC) -O0 -fopenmp
+INCLUDES = -I/usr/include/x86_64-linux-gnu -I/home/ary/libcurl_repo/curl/include/curl
+
+BIN_NAME = x86_thermocouple_client_main
+SRCS =  $(wildcard *.c)
+OBJS = $(SRCS:%.c=%.o)
+
+all: $(BIN_NAME)
+
+$(BIN_NAME): $(OBJS)
+	$(CC) ${CFLAGS} -o $@ $^ $(LIBS) $(EXT_LIBS)
+
+$(OBJS): $(SRCS)
+	$(CC) $(CFLAGS) -c $^ $(INCLUDES) 
+
+clean: 
+	rm -f *.o
+	rm -f $(BIN_NAME)

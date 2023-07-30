@@ -1,0 +1,21 @@
+#change <YOUR_PATH>
+
+sudo chmod +x <YOUR_PATH>/tcsimd
+<YOUR_PATH>/tcsimd
+
+touch /var/log/heater
+chmod 666 /var/log/heater
+
+touch /var/log/status
+chmod 666  /var/log/status
+
+touch  /var/log/messages
+chmod 666 /var/log/messages
+
+sudo apt-get update
+sudo apt-get install libjson-c-dev
+
+chmod +x <YOUR_PATH>/x86_thermocouple_client_main
+<YOUR_PATH>/x86_thermocouple_client_main 1 config_json.file
+
+
