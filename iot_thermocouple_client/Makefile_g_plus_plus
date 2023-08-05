@@ -5,9 +5,9 @@ EXT_LIBS = -lcurl -ljson-c
 CFLAGS = -g3 -Wall -pedantic -I. -I$(EXT_INC) -O0 -fopenmp
 INCLUDES = -I/usr/include/x86_64-linux-gnu -I/home/ary/libcurl_repo/curl/include/curl
 
-BIN_NAME = x86_thermocouple_client_main
 SRCS =  $(wildcard *.c)
 OBJS = $(SRCS:%.c=%.o)
+BIN_NAME = x86_thermocouple_client_main
 
 all: $(BIN_NAME)
 

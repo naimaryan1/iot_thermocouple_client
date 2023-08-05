@@ -1,24 +1,24 @@
 BUILDROOT_HOME=/home/ary/build_root_repo/buildroot
-CC=$(BUILDROOT_HOME)/output/host/usr/bin/arm-linux-cc
+CC=$(BUILDROOT_HOME)/output/host/usr/bin/arm-buildroot-linux-gnueabi-gcc
 CFLAGS=--sysroot=$(BUILDROOT_HOME)/output/staging 
+INCLUDES=-I/home/ary/libcurl_repo/curl/include/curl/curl.h
+LFLAGS=-L/home/ary/libcurl_repo/curl/lib
 
-LFLAGS= 
+LIBS=-lcurl -uClibc -lc 
 
-LIBS=-lcurl -uClibc -lc -lpthread -ljson-c
-
-SRC=main.c
-OBJ= $(wildcard *.c)
-MAIN= arm_thermocouple_client_main
+SRCS =  $(wildcard *.c)
+OBJS = $(SRCS:%.c=%.o)
+BIN_NAME= arm_thermocouple_client_main
 
 RM=rm -rf
 
 .c.o:
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
 
-all: $(MAIN)
+$(BIN_NAME): $(OBJ)
+	$(CC) $(CFLAGS) $(INCLUDES) -o $(BIN_NAME) $(OBJ) $(LFLAGS) $(LIBS)
 
-$(MAIN): $(OBJ)
-	$(CC) $(CFLAGS) -o $(MAIN) $(OBJ) $(LFLAGS) $(LIBS)
+all: $(BIN_NAME)
 
 clean:
-	$(RM) *o $(MAIN)
+	$(RM) $(BIN_NAME) *.o *~
