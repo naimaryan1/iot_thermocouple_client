@@ -21,6 +21,7 @@
  * sudo apt-get update
    sudo apt-get install libjson-c-dev
    sudo ldconfig
+ * 7) Make the <your_path>/thermocouple/tcsimd is running 
  * 
  */
 
@@ -30,13 +31,14 @@
 #include <string.h>
 #include <float.h>
 #include <stdbool.h>
-#include <json-c/json.h>
-#include <json-c/json_object.h>
 #include <curl/curl.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <cjson/cJSON.h>
+#include <cjson/cJSON_Utils.h>
 #define MAX_INPUT_LENGTH_1 4
-#define MAX_INPUT_LENGTH_2 10
+#define MAX_INPUT_LENGTH_2 11
+#define MAX_JSON_FILE_SIZE_BYTES 3072
 /*
  * Global Variables 
  */
@@ -50,27 +52,32 @@ const char* NO_ACTION_ON = "no action, already ON=1\n";
 const char* NO_ACTION_OFF = "no action, already ON=1\n";
 volatile int CONTINUE = 1;
 char* heat_status = "off";
-//init set points
-float set_point_1_temp = 0;
-float set_point_2_temp = 0;
-float set_point_3_temp = 0;
-//init set point times
-char* set_point_time_1_hh_mm = "HH:MM\0";
-char* set_point_time_2_hh_mm = "HH:MM\0";
-char* set_point_time_3_hh_mm = "HH:MM\0";
+
+
 //struct to store config_json values that passed in via cmd 
+//lets preallocate to avoid calling malloc mid program 
 
 typedef struct WebServiceConfig {
-    char web_service_base_url[1024];
+    char web_service_base_url[2048];
     char web_service_base_port[6];
     char create_config[64];
     char read_config[64];
     char update_config[64];
     char delete_config[64];
     char iot_id[16];
+    char entire_json_string[MAX_JSON_FILE_SIZE_BYTES];
 } WebServiceConfig;
 WebServiceConfig webServiceConfig;
 
+typedef struct SetPoints {
+    float set_point_1_temp;
+    float set_point_2_temp;
+    float set_point_3_temp;
+    char* set_point_time_1_hh_mm;
+    char* set_point_time_2_hh_mm;
+    char* set_point_time_3_hh_mm;
+} SetPoints;
+SetPoints setPoints;
 /*
  * Function Declarations - start
  */
@@ -91,12 +98,12 @@ void set_temp_and_time(float temp, char* time_hour_min);
 /*communicate*/
 void send_status_http(float temp, char* status, char* state);
 /*process*/
-int process(int argc, char** argv);
+int process(int argc, char** argv, WebServiceConfig* ws_config, SetPoints* set_points);
 /*isHeaterOn*/
 int isHeaterOn(const char* path);
 /*read JSON from path*/
 /*References:http://json-c.github.io/json-c/json-c-current-release/doc/html/index.html*/
-bool readJSONConfig(const char *filepath);
+int readJSONConfig(const char *filepath, WebServiceConfig* ws_config);
 /*create json msg*/
 char* json_http_message(char* id, char* state, char* temp,
         float set_point_temp_1,
@@ -116,12 +123,13 @@ void help();
 /*concat url, port, and function path & return web service URL*/
 void make_url(const char* web_service_base_url, const char* port, const char* path, char** url_string);
 /*set temp points*/
-void parse_cmd_input_to_set_temp_points(const char* input, float* set_point_temp, char** set_point_time_hh_mm);
+void parse_cmd_input_to_set_temp_points(char* input, int point, SetPoints* set_points);
 /*init_on_server*/
-void init_on_server(); 
+void init_on_server();
 /*call the web services at http://20.163.108.241:5000 */
 void call_web_service();
-void printGlobalVariables();
+void printGlobalVariables(SetPoints* set_points);
+void init(WebServiceConfig* wb_service_config, SetPoints* set_points);
 /*
  * Function Declarations - end
  */
@@ -139,13 +147,16 @@ void print_configs() {
     printf("Delete Config: %s\n", webServiceConfig.delete_config);
 }
 
-void printGlobalVariables() {
-    printf("set_point_1_temp = %.2f\n", set_point_1_temp);
-    printf("set_point_2_temp = %.2f\n", set_point_2_temp);
-    printf("set_point_3_temp = %.2f\n", set_point_3_temp);
-    printf("set_point_time_1_hh_mm = %s\n", set_point_time_1_hh_mm);
-    printf("set_point_time_2_hh_mm = %s\n", set_point_time_2_hh_mm);
-    printf("set_point_time_3_hh_mm = %s\n", set_point_time_3_hh_mm);
+void printGlobalVariables(SetPoints* set_points) {
+    if (NULL != set_points) {
+        printf("set_point_1_temp = %.2f\n", set_points->set_point_1_temp);
+        printf("set_point_2_temp = %.2f\n", set_points->set_point_2_temp);
+        printf("set_point_3_temp = %.2f\n", set_points->set_point_3_temp);
+        printf("set_point_time_1_hh_mm = %s\n", set_points->set_point_time_1_hh_mm);
+        printf("set_point_time_2_hh_mm = %s\n", set_points->set_point_time_2_hh_mm);
+        printf("set_point_time_3_hh_mm = %s\n", set_points->set_point_time_3_hh_mm);
+    }
+
 }
 
 float read_current_temp(const char* path_to_temp) {
@@ -155,12 +166,14 @@ float read_current_temp(const char* path_to_temp) {
         if (file == NULL) {
             fprintf(stderr, "Error opening file: %s\n", path_to_temp);
             //TODO: log error msg 
+        } else {
+            if (fscanf(file, "%f", &temp) != 1) {
+                fprintf(stderr, "Error reading temperature from file: %s\n", path_to_temp);
+                fclose(file);
+                //TODO: log error msg 
+            }
         }
-        if (fscanf(file, "%f", &temp) != 1) {
-            fprintf(stderr, "Error reading temperature from file: %s\n", path_to_temp);
-            fclose(file);
-            //TODO: log error msg 
-        }
+
     } else {
         printf("read_current_temp(), path_to_temp input is NULL\n");
     }
@@ -244,65 +257,85 @@ int isHeaterOn(const char* path) {
     return flag;
 }
 
-// Function to read the JSON file and populate the global struct
-bool readJSONConfig(const char *filepath) {
-    FILE *file = fopen(filepath, "r");
-    if (file == NULL) {
-        printf("Error opening the file.\n");
-        return 1;
-    }
+int readJSONConfig(const char* filepath, WebServiceConfig* ws_config) {
+    /*
+    {
+    "iot_id": "1000",
+    "web_service_base_url": "http://20.163.108.241",
+    "web_service_base_port": "5000",
+    "create_config": "/create_iot_device",
+    "read_config": "/read_iot_device",
+    "update_config": "/update_iot_device",
+    "delete_config": "/delete_iot_device"
+     }
+     */
+    int flag = 0;
+    if (NULL != filepath && NULL != ws_config) {
+        FILE* fp = fopen(filepath, "r");
 
-    // Get the file size
-    fseek(file, 0, SEEK_END);
-    long fileSize = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    // Allocate memory for the buffer
-    char *buffer = (char *) malloc(fileSize + 1); // +1 for null-terminator
-    if (buffer == NULL) {
-        printf("Memory allocation error.\n");
-        fclose(file);
-        return 1;
-    }
-
-    // Read the entire file into the buffer
-    size_t bytesRead = fread(buffer, 1, fileSize, file);
-    buffer[bytesRead] = '\0'; // Null-terminate the buffer
-    // Parse the JSON buffer
-    json_object *json = json_tokener_parse(buffer);
-    free(buffer);
-    fclose(file);
-
-    // Retrieve values from JSON and populate the struct
-    json_object_object_foreach(json, key, val) {
-        if (strcmp(key, "web_service_base_url") == 0) {
-            strncpy(webServiceConfig.web_service_base_url, json_object_get_string(val), sizeof (webServiceConfig.web_service_base_url) - 1);
-            webServiceConfig.web_service_base_url[sizeof (webServiceConfig.web_service_base_url) - 1] = '\0';
-        } else if (strcmp(key, "web_service_base_port") == 0) {
-            strncpy(webServiceConfig.web_service_base_port, json_object_get_string(val), sizeof (webServiceConfig.web_service_base_port) - 1);
-            webServiceConfig.web_service_base_port[sizeof (webServiceConfig.web_service_base_port) - 1] = '\0';
-        } else if (strcmp(key, "create_config") == 0) {
-            strncpy(webServiceConfig.create_config, json_object_get_string(val), sizeof (webServiceConfig.create_config) - 1);
-            webServiceConfig.create_config[sizeof (webServiceConfig.create_config) - 1] = '\0';
-        } else if (strcmp(key, "read_config") == 0) {
-            strncpy(webServiceConfig.read_config, json_object_get_string(val), sizeof (webServiceConfig.read_config) - 1);
-            webServiceConfig.read_config[sizeof (webServiceConfig.read_config) - 1] = '\0';
-        } else if (strcmp(key, "update_config") == 0) {
-            strncpy(webServiceConfig.update_config, json_object_get_string(val), sizeof (webServiceConfig.update_config) - 1);
-            webServiceConfig.update_config[sizeof (webServiceConfig.update_config) - 1] = '\0';
-        } else if (strcmp(key, "delete_config") == 0) {
-            strncpy(webServiceConfig.delete_config, json_object_get_string(val), sizeof (webServiceConfig.delete_config) - 1);
-            webServiceConfig.delete_config[sizeof (webServiceConfig.delete_config) - 1] = '\0';
-        } else if (strcmp(key, "iot_id") == 0) {
-            strncpy(webServiceConfig.iot_id, json_object_get_string(val), sizeof (webServiceConfig.iot_id) - 1);
-            webServiceConfig.iot_id[sizeof (webServiceConfig.iot_id) - 1] = '\0';
+        if (!fp) {
+            printf("Error opening the file.\n");
+            flag = 0;
         } else {
-
+            //init the string 
+            memset(ws_config->entire_json_string, '\0', sizeof (ws_config->entire_json_string));
+            //the the file contents to the the string 
+            fread(ws_config->entire_json_string, 1, MAX_JSON_FILE_SIZE_BYTES, fp);
+            cJSON* root = cJSON_Parse(ws_config->entire_json_string);
+            //close the file
+            fclose(fp);
+            //do we have a valid root?
+            if (!root) {
+                printf("JSON parsing failed.\n");
+                flag = 0;
+            } else {
+                //iot_id
+                const char* iot_id_key = "iot_id";
+                cJSON* iot_val = cJSON_GetObjectItemCaseSensitive(root, iot_id_key);
+                memset(ws_config->iot_id, '\0', sizeof (ws_config->iot_id));
+                strncpy(ws_config->iot_id, iot_val->valuestring, strlen(iot_val->valuestring));
+                //web_service_base_url
+                const char* web_service_base_url_key = "web_service_base_url";
+                cJSON* url_val = cJSON_GetObjectItemCaseSensitive(root, web_service_base_url_key);
+                memset(ws_config->web_service_base_url, '\0', sizeof (ws_config->web_service_base_url));
+                strncpy(ws_config->web_service_base_url, url_val->valuestring, strlen(url_val->valuestring));
+                //web_service_base_port
+                const char* web_service_port_key = "web_service_base_port";
+                cJSON* port_val = cJSON_GetObjectItemCaseSensitive(root, web_service_port_key);
+                memset(ws_config->web_service_base_port, '\0', sizeof (ws_config->web_service_base_port));
+                strncpy(ws_config->web_service_base_port, port_val->valuestring, strlen(port_val->valuestring));
+                //create_config
+                const char* create_config_key = "create_config";
+                cJSON* create_config_val = cJSON_GetObjectItemCaseSensitive(root, create_config_key);
+                memset(ws_config->create_config, '\0', sizeof (ws_config->create_config));
+                strncpy(ws_config->create_config, create_config_val->valuestring, strlen(create_config_val->valuestring));
+                //read
+                const char* read_config_key = "read_config";
+                cJSON* read_config_val = cJSON_GetObjectItemCaseSensitive(root, read_config_key);
+                memset(ws_config->read_config, '\0', sizeof (ws_config->read_config));
+                strncpy(ws_config->read_config, read_config_val->valuestring, strlen(read_config_val->valuestring));
+                //update
+                const char* update_config_key = "update_config";
+                cJSON* update_config_val = cJSON_GetObjectItemCaseSensitive(root, update_config_key);
+                memset(ws_config->update_config, '\0', sizeof (ws_config->update_config));
+                strncpy(ws_config->update_config, update_config_val->valuestring, strlen(update_config_val->valuestring));
+                //delete
+                const char* delete_config_key = "delete_config";
+                cJSON* delete_config_val = cJSON_GetObjectItemCaseSensitive(root, delete_config_key);
+                memset(ws_config->delete_config, '\0', sizeof (ws_config->delete_config));
+                strncpy(ws_config->delete_config, delete_config_val->valuestring, strlen(delete_config_val->valuestring));
+                flag = 1;
+                //makesure to cleanup
+                free(root);
+            }//end else 
         }
 
+    } else {
+        printf("Error readJSONConfig(), input params filerpath and/or ws_config are NUJLL\n");
+
     }
 
-    return true;
+    return flag;
 }
 
 /*construct the JSON message from input values*/
@@ -313,49 +346,47 @@ char* json_http_message(char* id, char* state, char* temp,
         char* set_point_time_1_hh_mm,
         char* set_point_time_2_hh_mm,
         char* set_point_time_3_hh_mm) {
-             // Create a buffer to hold the updated iot_state_message
+    // Create a buffer to hold the updated iot_state_message
     const char* error_message = "{\"error\":\"could not build message\"}";
     char* iot_state_message = (char*) malloc(1000 * sizeof (char));
-    if (id!=NULL && state!=NULL && temp!=NULL && set_point_time_1_hh_mm!=NULL && set_point_time_2_hh_mm!=NULL && set_point_time_3_hh_mm!=NULL)
-    {
+    if (id != NULL && state != NULL && temp != NULL && set_point_time_1_hh_mm != NULL && set_point_time_2_hh_mm != NULL && set_point_time_3_hh_mm != NULL) {
 
-    if (iot_state_message == NULL) {
-        printf("Memory allocation failed.\n");
-        return NULL;
-    }
-    char temp1[16]={0,};
-    char temp2[16]={0,};
-    char temp3[16]={0,};
-    snprintf(temp1, sizeof (temp1), "%.2f", set_point_temp_1);
-    snprintf(temp2, sizeof (temp2), "%.2f", set_point_temp_2);
-    snprintf(temp3, sizeof (temp3), "%.2f", set_point_temp_3);
+        if (iot_state_message == NULL) {
+            printf("Memory allocation failed.\n");
+            return NULL;
+        }
+        char temp1[16] = {0,};
+        char temp2[16] = {0,};
+        char temp3[16] = {0,};
+        snprintf(temp1, sizeof (temp1), "%.2f", set_point_temp_1);
+        snprintf(temp2, sizeof (temp2), "%.2f", set_point_temp_2);
+        snprintf(temp3, sizeof (temp3), "%.2f", set_point_temp_3);
 
-    // Construct the JSON message with input values
-    snprintf(iot_state_message, 1000,
-            "{\n"
-            "\t\"id\": \"%s\",\n"
-            "\t\"state\": \"%s\",\n"
-            "\t\"temp\": \"%s\",\n"
-            "\t\"set_point_1_time_hh_mm\": \"%s\",\n"
-            "\t\"set_point_2_time_hh_mm\": \"%s\",\n"
-            "\t\"set_point_3_time_hh_mm\": \"%s\",\n"
-            "\t\"set_point_1\": \"%s\",\n"
-            "\t\"set_point_2\": \"%s\",\n"
-            "\t\"set_point_3\": \"%s\"\n"
-            "}",
-            id, state, temp, set_point_time_1_hh_mm, set_point_time_2_hh_mm, set_point_time_3_hh_mm,
-            temp1, temp2, temp3);
-    }
-    else
-    {
+        // Construct the JSON message with input values
+        snprintf(iot_state_message, 1000,
+                "{\n"
+                "\t\"id\": \"%s\",\n"
+                "\t\"state\": \"%s\",\n"
+                "\t\"temp\": \"%s\",\n"
+                "\t\"set_point_1_time_hh_mm\": \"%s\",\n"
+                "\t\"set_point_2_time_hh_mm\": \"%s\",\n"
+                "\t\"set_point_3_time_hh_mm\": \"%s\",\n"
+                "\t\"set_point_1\": \"%s\",\n"
+                "\t\"set_point_2\": \"%s\",\n"
+                "\t\"set_point_3\": \"%s\"\n"
+                "}",
+                id, state, temp, set_point_time_1_hh_mm, set_point_time_2_hh_mm, set_point_time_3_hh_mm,
+                temp1, temp2, temp3);
+    } else {
         strcpy(iot_state_message, error_message);
     }
-  
-     return iot_state_message;
-   
+
+    return iot_state_message;
+
 }
 
 // Function to handle the HTTP response from the server
+
 static size_t write_callback(void *contents, size_t size, size_t nmemb, char *response_json) {
     size_t total_size = size * nmemb;
     strcat(response_json, (char *) contents);
@@ -363,58 +394,82 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, char *re
 }
 
 // Function to create and post an IoT message to a given URL
+
 bool create_iot_message(const char *url, const char *message, char *response_json) {
     bool success = false;
-
+    curl_global_init(CURL_GLOBAL_ALL);
     // Initialize the libcurl library
     CURL *curl = curl_easy_init();
     if (!curl) {
         fprintf(stderr, "Failed to initialize libcurl\n");
         return false;
-    }
-
-    // Set up the POST request
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, message);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_json);
-
-    // Perform the HTTP POST request
-    CURLcode res = curl_easy_perform(curl);
-
-    // Check for errors and get the HTTP response code
-    long http_response_code = 0;
-    if (res == CURLE_OK) {
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_response_code);
-        printf("{\"http_response\": %ld}", http_response_code);
-
-        // Check if the HTTP response code is 200 (OK)
-        if (http_response_code == 200) {
-            success = true;
-        }
     } else {
-        fprintf(stderr, "HTTP request failed: %s\n", curl_easy_strerror(res));
+
+        struct curl_slist *headers = NULL;
+        headers = curl_slist_append(headers, "Content-Type: application/json");
+        // Set up the POST request
+        curl_easy_setopt(curl, CURLOPT_URL, url);
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, message);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long) strlen(message));
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, response_json);
+
+
+
+        // Perform the HTTP POST request
+        CURLcode res = curl_easy_perform(curl);
+
+        // Check for errors and get the HTTP response code
+        long http_response_code = 0;
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_response_code);
+            printf("{\"http_response\": %ld}", http_response_code);
+
+            // Check if the HTTP response code is 200 (OK)
+            if (http_response_code == 200) {
+                success = true;
+            }
+        } else {
+            fprintf(stderr, "HTTP request failed: %s\n", curl_easy_strerror(res));
+        }
+
+        // Clean up and release resources
+        curl_easy_cleanup(curl);
     }
 
-    // Clean up and release resources
-    curl_easy_cleanup(curl);
-
+    curl_global_cleanup();
     return success;
 }
 
 /*
  * process reads the temp & turns heater on or off based on the setpoint. 
  */
-int process(int argc, char** argv) {
+int process(int argc, char** argv, WebServiceConfig* ws_config, SetPoints* set_points) {
+
     int program_status = 0;
     printf("Starting IoT Client...");
+    //alloc & remember to free 
+    if (NULL == setPoints.set_point_time_1_hh_mm) {
+
+        setPoints.set_point_time_1_hh_mm = (char*) calloc(10, sizeof (char));
+        setPoints.set_point_time_2_hh_mm = (char*) calloc(10, sizeof (char));
+        setPoints.set_point_time_3_hh_mm = (char*) calloc(10, sizeof (char));
+    }
+    //init the chars 
+    if (NULL != setPoints.set_point_time_1_hh_mm) {
+        memset(setPoints.set_point_time_1_hh_mm, '\0', sizeof (setPoints.set_point_time_1_hh_mm));
+        memset(setPoints.set_point_time_2_hh_mm, '\0', sizeof (setPoints.set_point_time_2_hh_mm));
+        memset(setPoints.set_point_time_3_hh_mm, '\0', sizeof (setPoints.set_point_time_3_hh_mm));
+    }
+    init(ws_config, set_points);
     help();
     //process user requests from command line in another thread without blocking 
     pthread_t tid;
     if (argc < 2) {
         printf("IoT Client, missing required inputs!");
     } else {
-        
+
         //1) start a non blocking thread to handle user input 
         int threadCreationResult = pthread_create(&tid, NULL, userInputThread, NULL);
         if (threadCreationResult != 0) {
@@ -423,16 +478,18 @@ int process(int argc, char** argv) {
         }
 
 
+
         float current_temp = FLT_MIN;
         float current_set_point_temp = 100;
         int heater_status = FLT_MIN;
         bool read_settings = false;
 
         //2) read required settings from JSON 
-        read_settings = readJSONConfig(argv[2]);
+        read_settings = readJSONConfig(argv[2], ws_config);
+        print_configs();
         if (read_settings) {
 
-            if (argc >= 2 && strcmp(argv[1], "1") == 0) {
+            if (argc >= 2 && (strcmp(argv[1], "1")) == 0) {
                 CONTINUE = 1;
                 init_on_server();
 
@@ -444,7 +501,6 @@ int process(int argc, char** argv) {
             }
 
 
-            int user_input;
             //while loop
             while (1) {
                 if (CONTINUE) {
@@ -500,72 +556,100 @@ int process(int argc, char** argv) {
 
     }//end else has requirec inputs
 
+    //clean 
+    if (NULL != setPoints.set_point_time_1_hh_mm) {
+        free(setPoints.set_point_time_1_hh_mm);
+        free(setPoints.set_point_time_2_hh_mm);
+        free(setPoints.set_point_time_3_hh_mm);
 
+    }
     return program_status;
 }//end process
 
-void parse_cmd_input_to_set_temp_points(const char* input, float* set_point_temp, char** set_point_time_hh_mm) {
-    float temp_flt;
-    char hour[3];
-    char min[3];
-    bool ok_temp = false;
-    bool ok_hour = false;
-    bool ok_min = false;
+void parse_cmd_input_to_set_temp_points(char* input, int point, SetPoints* set_points) {
+    char *token;
+    float temp = 0.0;
+    float hours = 0;
+    float min = 0;
+    int match = 0;
+    // Remove the newline character from the end of the input
+    int length = strlen(input);
+    if (length >= 8) {
+        input[length - 1] = '\0';
+        char temp_array[3];
+        memset(temp_array, '\0', sizeof (temp_array));
+        token = strtok(input, ",");
+        if (token) {
+            strcpy(temp_array, token);
+            match = sscanf(temp_array, "%3f", &temp);
 
-    if (input != NULL && *set_point_time_hh_mm != NULL) {
-        int items_matched = sscanf(input, "%f,%2[^:]:%2s", &temp_flt, hour, min);
-        if (items_matched != 3) {
-            printf("Invalid format.\n");
-            help();
-            return;
-        }
+            if (match == 1) {
 
-        if (temp_flt < 0 || temp_flt > 100) {
-            printf("Temperature must be between 0 to 100.\n");
-            return;
+                char hours_min[6];
+                hours_min[6] = '\0';
+                memset(hours_min, '\0', sizeof (hours_min));
+                if (point == 1) {
+                    set_points->set_point_1_temp = temp;
+                    if (length == 9) {
+                        strncpy(hours_min, input + 3, 5);
+                        //set 
+                        strncpy(set_points->set_point_time_1_hh_mm, hours_min, strlen(hours_min));
+                    }
+                    if (length == 10) {
+                        set_points->set_point_1_temp = temp;
+                        strncpy(hours_min, input + 4, 5);
+                        strncpy(set_points->set_point_time_1_hh_mm, hours_min, strlen(hours_min));
+                    }
+                }
+                if (point == 2) {
+                    set_points->set_point_2_temp = temp;
+                    if (length == 9) {
+                        strncpy(hours_min, input + 3, 5);
+                        strncpy(set_points->set_point_time_2_hh_mm, hours_min, strlen(hours_min));
+                    }
+                    if (length == 10) {
+                        strncpy(hours_min, input + 4, 5);
+                        strncpy(set_points->set_point_time_2_hh_mm, hours_min, strlen(hours_min));
+                    }
+                }
+                if (point == 3) {
+                    set_points->set_point_3_temp = temp;
+                    if (length == 9) {
+                        strncpy(hours_min, input + 3, 5);
+                        strncpy(set_points->set_point_time_3_hh_mm, hours_min, strlen(hours_min));
+
+                    }
+                    if (length == 10) {
+
+                        strncpy(hours_min, input + 4, 5);
+                        strncpy(set_points->set_point_time_3_hh_mm, hours_min, strlen(hours_min));
+
+                    }
+                }
+
+            }
+
         } else {
-            ok_temp = true;
-        }
+            printf("Bad format must be temp,HH:MM. You forgot the commna.\n");
 
-        int hour_val = atoi(hour);
-        if (hour_val < 0 || hour_val > 23) {
-            printf("Invalid hour. The hour must be between 0 to 23.\n");
-        } else {
-            ok_hour = true;
-        }
-
-        int min_val = atoi(min);
-        if (min_val < 0 || min_val > 59) {
-            printf("Invalid minutes. The minutes must be between 0 to 59.\n");
-        } else {
-            ok_min = true;
-        }
-
-        if (ok_temp && ok_hour && ok_min) {
-            *set_point_temp = temp_flt;
-
-            // Replace the "HH" part in the global variable set_point_time_1_hh_mm with hour
-            set_point_time_hh_mm[0] = (char)('0'+(hour_val / 10));
-            set_point_time_hh_mm[1] =  (char)('0'+(hour_val % 10));
-
-            // Replace the "MM" part in the global variable set_point_time_1_hh_mm with min
-            set_point_time_hh_mm[3]  =(char) ('0'+(min_val / 10));
-            set_point_time_hh_mm[4] = (char)('0'+(min_val % 10));
         }
     } else {
-        printf("parseCommandLineInput() invalid input!");
+        printf("Bad format must be temp,HH:MM\n");
     }
 
 }
 
+void parse_cmd_input_set_hour_min(char* input, SetPoints* set_points);
+
 /*userInputThread is executed by the separate thread, so we can continue to send commands*/
 void* userInputThread(void* arg) {
-    char input[MAX_INPUT_LENGTH_1];
-    char input_2[MAX_INPUT_LENGTH_2];
+    char input[MAX_INPUT_LENGTH_1] = {0};
+    char input_2[MAX_INPUT_LENGTH_2] = {0};
+
     float current_temp = FLT_MIN;
-    char* url = NULL; 
+    char* url = NULL;
     bool call_webservice = false;
-    bool exit_flag = false; 
+    bool exit_flag = false;
     while (1) {
         printf("Enter input (or 'exit' to quit): ");
         fgets(input, MAX_INPUT_LENGTH_1, stdin);
@@ -576,7 +660,7 @@ void* userInputThread(void* arg) {
             CONTINUE = 1;
             int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.update_config);
             url = (char*) malloc(total_url_length + 1);
-            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.create_config, &url);
+            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.update_config, &url);
             call_webservice = true;
 
         }
@@ -585,7 +669,7 @@ void* userInputThread(void* arg) {
             CONTINUE = 0;
             int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.update_config);
             url = (char*) malloc(total_url_length + 1);
-            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.create_config, &url);
+            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.update_config, &url);
             call_webservice = true;
 
         }
@@ -598,26 +682,38 @@ void* userInputThread(void* arg) {
         }
         if (strcmp(input, "4\n") == 0) {
             printf("Setting the temperature point 1. Enter temp,HH:MM.\n");
-            fgets(input, MAX_INPUT_LENGTH_2, stdin);
+            fgets(input_2, MAX_INPUT_LENGTH_2, stdin);
             //set temp point 1 
-            parse_cmd_input_to_set_temp_points(input, &set_point_1_temp, &set_point_time_1_hh_mm);
+            parse_cmd_input_to_set_temp_points(input_2, 1, &setPoints);
+            int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.update_config);
+            url = (char*) malloc(total_url_length + 1);
+            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.update_config, &url);
+            call_webservice = true;
 
         }
         if (strcmp(input, "5\n") == 0) {
             printf("Setting the temperature point 2. Enter temp,HH:MM.\n");
-            fgets(input, MAX_INPUT_LENGTH_2, stdin);
-            parse_cmd_input_to_set_temp_points(input, &set_point_2_temp, &set_point_time_2_hh_mm);
+            fgets(input_2, MAX_INPUT_LENGTH_2, stdin);
+            parse_cmd_input_to_set_temp_points(input_2, 2, &setPoints);
+            int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.update_config);
+            url = (char*) malloc(total_url_length + 1);
+            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.update_config, &url);
+            call_webservice = true;
 
         }
         if (strcmp(input, "6\n") == 0) {
             printf("Setting the temperature point 3. Enter temp,HH:MM.\n");
-            fgets(input, MAX_INPUT_LENGTH_2, stdin);
-            parse_cmd_input_to_set_temp_points(input, &set_point_3_temp, &set_point_time_3_hh_mm);
+            fgets(input_2, MAX_INPUT_LENGTH_2, stdin);
+            parse_cmd_input_to_set_temp_points(input_2, 3, &setPoints);
+            int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.update_config);
+            url = (char*) malloc(total_url_length + 1);
+            make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.update_config, &url);
+            call_webservice = true;
 
         }
         if (strcmp(input, "7\n") == 0) {
             printf("Get all temperature settings.\n");
-            printGlobalVariables();
+            printGlobalVariables(&setPoints);
 
         }
         if (strcmp(input, "-h\n") == 0 || strcmp(input, "-help\n") == 0) {
@@ -631,12 +727,10 @@ void* userInputThread(void* arg) {
             url = (char*) malloc(total_url_length + 1);
             make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.create_config, &url);
             call_webservice = true;
-            exit_flag= true; 
-            break;
+            exit_flag = true;
         }
         //if call_webservice?
-        if (call_webservice)
-        {
+        if (call_webservice) {
             //construct web service call - start 
             current_temp = read_current_temp(TEMP_PATH);
             char temp[16]; // A buffer to store the resulting string
@@ -645,7 +739,7 @@ void* userInputThread(void* arg) {
             if (CONTINUE) {
                 state = "1";
             }
-            char* iot_msg = json_http_message(webServiceConfig.iot_id, state, temp, set_point_1_temp, set_point_2_temp, set_point_3_temp, set_point_time_1_hh_mm, set_point_time_2_hh_mm, set_point_time_3_hh_mm);
+            char* iot_msg = json_http_message(webServiceConfig.iot_id, state, temp, setPoints.set_point_1_temp, setPoints.set_point_2_temp, setPoints.set_point_3_temp, setPoints.set_point_time_1_hh_mm, setPoints.set_point_time_2_hh_mm, setPoints.set_point_time_3_hh_mm);
             char response_json[512] = {0};
             log_message(LOG_MESSAGES_PATH, url);
             printf("Calling=%s\n:", url);
@@ -660,15 +754,16 @@ void* userInputThread(void* arg) {
                 printf("Failed to send message.\n");
                 log_message(LOG_MESSAGES_PATH, "Failed to send message.\n");
             }
-            call_webservice = false; 
+            call_webservice = false;
         }//end if 
-        
-         
+        if (exit_flag)
+        {
+            break; 
+        }
     }//end while
     //clean the thread
     pthread_exit(NULL);
-    if (exit_flag)
-    {
+    if (exit_flag) {
         exit(0);
     }
 }
@@ -704,39 +799,55 @@ void log_message(const char* path_to_log, const char* msg) {
 }
 
 /*create the IoT device on the server*/
-void init_on_server()
-{
-        float current_temp = FLT_MIN;
-        char* url = NULL; 
-        printf("create IoT device record on the server...");
-        CONTINUE = 1;
-        int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.create_config);
-        url = (char*) malloc(total_url_length + 1);
-        make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.create_config, &url);             
-        //construct web service call - start 
-                char temp[16]; // A buffer to store the resulting string
-                snprintf(temp, sizeof (temp), "%.2f", current_temp);
-                char* state = "0";
-                if (CONTINUE)
-                {
-                    state = "1";
-                }
-                char* iot_msg = json_http_message(webServiceConfig.iot_id,state, temp, set_point_1_temp, set_point_2_temp, set_point_3_temp, set_point_time_1_hh_mm, set_point_time_2_hh_mm, set_point_time_3_hh_mm);
-                char response_json[512] = {0};
-                log_message(LOG_MESSAGES_PATH, url);
-                printf("Calling%s\n:", url);
-                log_message(LOG_MESSAGES_PATH, iot_msg);
-                printf("Payload%s\n:", iot_msg);
-                bool result = create_iot_message(url, iot_msg, response_json);
-                if (result) {
-                    printf("Message sent successfully!\n");
-                    printf("HTTP Response JSON: %s\n", response_json);
-                    log_message(LOG_MESSAGES_PATH, response_json);
-                } else {
-                    printf("Failed to send message.\n");
-                    log_message(LOG_MESSAGES_PATH, "Failed to send message.\n");
-                }
+void init_on_server() {
+    float current_temp = FLT_MIN;
+    char* url = NULL;
+    printf("create IoT device record on the server...");
+    CONTINUE = 1;
+    int total_url_length = strlen(webServiceConfig.web_service_base_url) + strlen(webServiceConfig.web_service_base_port) + strlen(webServiceConfig.create_config);
+    url = (char*) malloc(total_url_length + 1);
+    make_url(webServiceConfig.web_service_base_url, webServiceConfig.web_service_base_port, webServiceConfig.create_config, &url);
+    //construct web service call - start 
+    char temp[16]; // A buffer to store the resulting string
+    snprintf(temp, sizeof (temp), "%.2f", current_temp);
+    char* state = "0";
+    if (CONTINUE) {
+        state = "1";
+    }
+    char* iot_msg = json_http_message(webServiceConfig.iot_id, state, temp, setPoints.set_point_1_temp, setPoints.set_point_2_temp, setPoints.set_point_3_temp, setPoints.set_point_time_1_hh_mm, setPoints.set_point_time_2_hh_mm, setPoints.set_point_time_3_hh_mm);
+    char response_json[512] = {0};
+    log_message(LOG_MESSAGES_PATH, url);
+    printf("Calling%s\n:", url);
+    log_message(LOG_MESSAGES_PATH, iot_msg);
+    printf("Payload%s\n:", iot_msg);
+    bool result = create_iot_message(url, iot_msg, response_json);
+    if (result) {
+        printf("Message sent successfully!\n");
+        printf("HTTP Response JSON: %s\n", response_json);
+        log_message(LOG_MESSAGES_PATH, response_json);
+    } else {
+        printf("Failed to send message.\n");
+        log_message(LOG_MESSAGES_PATH, "Failed to send message.\n");
+    }
 
+}
+
+void init(WebServiceConfig* wb_service_config, SetPoints* set_points) {
+    //init web service struct 
+    webServiceConfig.iot_id[0] = '\0';
+    webServiceConfig.web_service_base_url[0] = '\0';
+    webServiceConfig.web_service_base_port[0] = '\0';
+    webServiceConfig.create_config[0] = '\0';
+    webServiceConfig.read_config[0] = '\0';
+    webServiceConfig.update_config[0] = '\0';
+    webServiceConfig.delete_config[0] = '\0';
+    //init set points struct 
+    set_points->set_point_1_temp = 0;
+    set_points->set_point_2_temp = 0;
+    set_points->set_point_3_temp = 0;
+    set_points->set_point_time_1_hh_mm[0] = '\0';
+    set_points->set_point_time_2_hh_mm [0] = '\0';
+    set_points->set_point_time_3_hh_mm [0] = '\0';
 }
 
 /*help menu*/
@@ -749,15 +860,14 @@ void help() {
     printf("5) set temperature point 2 & time - Input 5 press Enter,then temp,hour:min press Enter\n");
     printf("6) set temperature point 3 & time - Input 6 press Enter,then temp,hour:min press Enter\n");
     printf("7) get all temperature points - Input 7\n");
-    printf("8) Help - Input -h or -help\n");
-    printf("9)) Exit/Shutdown - Input -e or -exit\n");
+    printf("8) For help menu input -h or -help\n");
+    printf("9) Exit/Shutdown - Input -e or -exit\n");
 }
 
 /* Function implementations - End*/
 
-
 /* MAIN*/
 int main(int argc, char** argv) {
-    process(argc, argv);
+    process(argc, argv, &webServiceConfig, &setPoints);
     return (EXIT_SUCCESS);
 }
